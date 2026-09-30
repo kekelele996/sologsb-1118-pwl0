@@ -2,6 +2,7 @@
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useStore } from '@/hooks/usePersistentStore'
+import RelationDedupDialog from '@/components/common/RelationDedupDialog.vue'
 import { trenchStore } from '@/stores/trenchStore'
 import { stratumStore } from '@/stores/stratumStore'
 import { artifactStore } from '@/stores/artifactStore'
@@ -71,6 +72,7 @@ onMounted(async () => {
         <router-view />
       </el-main>
     </el-container>
+    <RelationDedupDialog />
   </el-container>
 </template>
 

@@ -7,6 +7,7 @@ import RelationGraph from '@/components/common/RelationGraph.vue'
 import UnitPicker from '@/components/common/UnitPicker.vue'
 import { useStore } from '@/hooks/usePersistentStore'
 import { checkRelationCycle, useRelationGraph } from '@/hooks/useRelationGraph'
+import { relationDedupKey } from '@/migrations/relationDedup'
 import { relationStore } from '@/stores/relationStore'
 import { stratumStore } from '@/stores/stratumStore'
 import { trenchStore } from '@/stores/trenchStore'
@@ -95,6 +96,22 @@ async function submit(): Promise<void> {
     basis: form.basis,
     recorder: form.recorder.trim(),
     note: form.note.trim()
+  }
+  // 重复拦截：同一对单位、同一种关系只保留一条（共存无方向，A/B 互换视为同一对）
+  const duplicate = relationState.relations.find(
+    (item) => item.id !== editingId.value && relationDedupKey(item) === relationDedupKey(row)
+  )
+  if (duplicate) {
+    try {
+      await ElMessageBox.confirm(
+        `已存在同一对单位的同类型关系：${unitLabel(duplicate.unitAId)} ${duplicate.type} ${unitLabel(duplicate.unitBId)}（${duplicate.basis} · ${duplicate.recorder || '未填记录人'}）。是否覆盖为本次填写的内容？`,
+        '检测到重复关系',
+        { type: 'warning', confirmButtonText: '覆盖更新', cancelButtonText: '取消' }
+      )
+    } catch {
+      return
+    }
+    row.id = duplicate.id
   }
   await relationStore.getState().save(row)
   ElMessage.success(`已记录：${unitLabel(row.unitAId)} ${row.type} ${unitLabel(row.unitBId)}`)

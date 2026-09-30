@@ -4,7 +4,7 @@ import Dexie, { type Table } from 'dexie'
 import type { Artifact, Relation, Stratum, Trench } from '@/types'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
@@ -50,6 +50,17 @@ class TrenchLogDb extends Dexie {
             }
           })
       })
+    // v3：层位关系去重发布（表结构不变）。数据修复由应用层迁移
+    // migrations/relationDedup 在单个读写事务内完成：重复关系合并为一条，
+    // 依据/记录人不一致时先弹框确认；此处 bump 版本号用于触发 blocked 事件，
+    // 旧版页面仍占着库时等待其关闭后再继续。
+    this.version(SCHEMA_VERSION).stores({
+      trenches: 'id, code, area, backfilled',
+      strata: 'id, trenchId, code, type, topDepth',
+      artifacts: 'id, stratumId, code, category, date',
+      relations: 'id, unitAId, unitBId, type, basis',
+      meta: 'key'
+    })
   }
 }
 

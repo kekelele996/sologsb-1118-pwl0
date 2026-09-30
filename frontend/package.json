@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "test:migration": "esbuild src/utils/relationMigration.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.tmp/relationMigration.test.mjs && node node_modules/.tmp/relationMigration.test.mjs",
     "preview": "vite preview --port 21818"
   },
   "dependencies": {

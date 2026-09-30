@@ -2,14 +2,39 @@ import { onUnmounted, reactive } from 'vue'
 import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
 import type { Artifact, Relation, Stratum, Trench } from '@/types'
+import {
+  buildRelationMigrationPlan,
+  loadMigrationDecisions,
+  prepareRelationUpgrade,
+  type RelationMigrationDecisions,
+  type RelationMigrationPlan
+} from '@/utils/relationMigration'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 4
 
 export interface MetaRow {
   key: string
   value: number
 }
+
+interface LegacyDatabase {
+  trenches: Trench[]
+  strata: Stratum[]
+  artifacts: Artifact[]
+  relations: Array<Partial<Relation>>
+}
+
+export interface RelationPreflightReport {
+  needsUpgrade: boolean
+  plan: RelationMigrationPlan
+  trenches: Trench[]
+  strata: Stratum[]
+  decisions: RelationMigrationDecisions
+}
+
+const DB_NAME = 'gbtrenchlog'
+let relationMigrationDecisions: RelationMigrationDecisions = {}
 
 /** Dexie 封装：探方 / 地层单位 / 出土物 / 层位关系 四张表 + 元数据表 */
 class TrenchLogDb extends Dexie {
@@ -20,7 +45,7 @@ class TrenchLogDb extends Dexie {
   meta!: Table<MetaRow, string>
 
   constructor() {
-    super('gbtrenchlog')
+    super(DB_NAME)
     this.version(1).stores({
       trenches: 'id, code, area',
       strata: 'id, trenchId, code, type',
@@ -29,7 +54,15 @@ class TrenchLogDb extends Dexie {
       meta: 'key'
     })
     // v2：地层单位新增「开口层位」字段，迁移时为历史数据补齐默认值
-    this.version(SCHEMA_VERSION)
+    this.version(2).stores({
+      trenches: 'id, code, area, backfilled',
+      strata: 'id, trenchId, code, type, topDepth',
+      artifacts: 'id, stratumId, code, category, date',
+      relations: 'id, unitAId, unitBId, type, basis',
+      meta: 'key'
+    })
+    // v3：先在同一个升级事务内合并重复层位关系；此时仍只建普通索引，避免唯一性校验先于数据清理执行。
+    this.version(3)
       .stores({
         trenches: 'id, code, area, backfilled',
         strata: 'id, trenchId, code, type, topDepth',
@@ -49,11 +82,95 @@ class TrenchLogDb extends Dexie {
               stratum.inclusions = []
             }
           })
+
+        const relations = await tx.table<Relation, string>('relations').toArray()
+        const changes = prepareRelationUpgrade(relations, relationMigrationDecisions)
+        if (changes.puts.length > 0) {
+          await tx.table<Relation, string>('relations').bulkPut(changes.puts)
+        }
+        if (changes.deletedIds.length > 0) {
+          await tx.table<Relation, string>('relations').bulkDelete(changes.deletedIds)
+        }
       })
+    // v4：数据已清理后，给「单位 A + 关系类型 + 单位 B」加唯一索引，作为后续保存的硬约束。
+    this.version(4).stores({
+      trenches: 'id, code, area, backfilled',
+      strata: 'id, trenchId, code, type, topDepth',
+      artifacts: 'id, stratumId, code, category, date',
+      relations: 'id, unitAId, unitBId, type, basis, &[unitAId+type+unitBId]',
+      meta: 'key'
+    })
   }
 }
 
 export const db = new TrenchLogDb()
+
+export function setRelationMigrationDecisions(decisions: RelationMigrationDecisions): void {
+  relationMigrationDecisions = decisions
+}
+
+function openCurrentDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) {
+      reject(new Error('当前浏览器不支持 IndexedDB'))
+      return
+    }
+
+    const request = window.indexedDB.open(DB_NAME)
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error ?? new Error('无法打开数据库'))
+  })
+}
+
+function readLegacyStore(legacyDb: IDBDatabase, storeName: keyof LegacyDatabase): Promise<unknown[]> {
+  return new Promise((resolve, reject) => {
+    if (!legacyDb.objectStoreNames.contains(storeName)) {
+      resolve([])
+      return
+    }
+
+    const transaction = legacyDb.transaction(storeName, 'readonly')
+    const request = transaction.objectStore(storeName).getAll()
+    request.onsuccess = () => resolve(request.result ?? [])
+    request.onerror = () => reject(request.error ?? new Error(`读取 ${storeName} 失败`))
+  })
+}
+
+async function readLegacyDatabase(legacyDb: IDBDatabase): Promise<LegacyDatabase> {
+  const [trenches, strata, artifacts, relations] = await Promise.all([
+    readLegacyStore(legacyDb, 'trenches'),
+    readLegacyStore(legacyDb, 'strata'),
+    readLegacyStore(legacyDb, 'artifacts'),
+    readLegacyStore(legacyDb, 'relations')
+  ])
+
+  return {
+    trenches: trenches as Trench[],
+    strata: strata as Stratum[],
+    artifacts: artifacts as Artifact[],
+    relations: relations as Array<Partial<Relation>>
+  }
+}
+
+/** 以当前已安装版本只读打开数据库，先列出待合并和待确认数据；绝不触发新版升级。 */
+export async function inspectRelationUpgrade(): Promise<RelationPreflightReport | null> {
+  const legacyDb = await openCurrentDatabase()
+  try {
+    if (legacyDb.version >= SCHEMA_VERSION) return null
+
+    const data = await readLegacyDatabase(legacyDb)
+    const plan = buildRelationMigrationPlan(data.relations)
+    return {
+      needsUpgrade: true,
+      plan,
+      trenches: data.trenches,
+      strata: data.strata,
+      decisions: loadMigrationDecisions(plan.fingerprint)
+    }
+  } finally {
+    legacyDb.close()
+  }
+}
 
 /** 写入当前数据结构版本号 */
 export async function stampDbVersion(): Promise<void> {
@@ -61,17 +178,17 @@ export async function stampDbVersion(): Promise<void> {
 }
 
 /** 读取整表 */
-export async function syncAll<T extends object>(table: Table<T, string>): Promise<T[]> {
+export async function syncAll<T extends object>(table: Dexie.Table<T, string>): Promise<T[]> {
   return table.toArray()
 }
 
 /** 写入一条记录 */
-export async function syncPut<T extends object>(table: Table<T, string>, row: T): Promise<void> {
+export async function syncPut<T extends object>(table: Dexie.Table<T, string>, row: T): Promise<void> {
   await table.put(row)
 }
 
 /** 删除一条记录 */
-export async function syncDelete<T extends object>(table: Table<T, string>, id: string): Promise<void> {
+export async function syncDelete<T extends object>(table: Dexie.Table<T, string>, id: string): Promise<void> {
   await table.delete(id)
 }
 

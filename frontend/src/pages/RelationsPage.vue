@@ -10,6 +10,7 @@ import { checkRelationCycle, useRelationGraph } from '@/hooks/useRelationGraph'
 import { relationStore } from '@/stores/relationStore'
 import { stratumStore } from '@/stores/stratumStore'
 import { trenchStore } from '@/stores/trenchStore'
+import { getRelationIdentity, normalizeRelation } from '@/utils/relationMigration'
 import { uid } from '@/utils/id'
 
 const relationState = useStore(relationStore)
@@ -80,23 +81,42 @@ async function submit(): Promise<void> {
     ElMessage.error('单位 A 与单位 B 不能相同')
     return
   }
+  const identity = getRelationIdentity({
+    unitAId: form.unitAId,
+    unitBId: form.unitBId,
+    type: form.type
+  })
   const others = relationState.relations.filter((item) => item.id !== editingId.value)
-  if (checkRelationCycle(others, { unitAId: form.unitAId, unitBId: form.unitBId, type: form.type })) {
+  const duplicated = others.some((item) => getRelationIdentity(item).key === identity.key)
+  if (duplicated) {
+    ElMessage.error(`拒绝保存：${unitLabel(identity.unitAId)} 与 ${unitLabel(identity.unitBId)} 已存在「${identity.type}」关系`)
+    return
+  }
+  if (checkRelationCycle(others, identity)) {
     ElMessage.error(
-      `拒绝保存：${unitLabel(form.unitAId)} ${form.type} ${unitLabel(form.unitBId)} 会形成环路矛盾（层位关系不能自相闭合）`
+      `拒绝保存：${unitLabel(identity.unitAId)} ${identity.type} ${unitLabel(identity.unitBId)} 会形成环路矛盾（层位关系不能自相闭合）`
     )
     return
   }
-  const row: Relation = {
+  const row = normalizeRelation({
     id: editingId.value ?? uid('rl'),
-    unitAId: form.unitAId,
-    type: form.type,
-    unitBId: form.unitBId,
+    unitAId: identity.unitAId,
+    type: identity.type,
+    unitBId: identity.unitBId,
     basis: form.basis,
     recorder: form.recorder.trim(),
     note: form.note.trim()
+  })
+  try {
+    await relationStore.getState().save(row)
+  } catch (error) {
+    const name = error instanceof DOMException ? error.name : ''
+    if (name === 'ConstraintError') {
+      ElMessage.error(`拒绝保存：${unitLabel(identity.unitAId)} 与 ${unitLabel(identity.unitBId)} 的「${identity.type}」关系已存在`)
+      return
+    }
+    throw error
   }
-  await relationStore.getState().save(row)
   ElMessage.success(`已记录：${unitLabel(row.unitAId)} ${row.type} ${unitLabel(row.unitBId)}`)
   resetForm()
 }

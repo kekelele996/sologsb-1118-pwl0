@@ -1,6 +1,7 @@
 import { createStore } from 'zustand/vanilla'
 import type { Relation } from '@/types'
 import { db, syncAll, syncDelete, syncPut } from '@/hooks/usePersistentStore'
+import { normalizeRelation } from '@/utils/relationMigration'
 
 export interface RelationState {
   relations: Relation[]
@@ -21,7 +22,7 @@ export const relationStore = createStore<RelationState>((set, get) => ({
     set({ relations, loaded: true })
   },
   save: async (relation) => {
-    await syncPut<Relation>(db.relations, relation)
+    await syncPut<Relation>(db.relations, normalizeRelation(relation))
     await get().hydrate()
   },
   remove: async (id) => {
